@@ -18,6 +18,17 @@ tts_hash = None
 lock = Lock()
 
 _last_stop_signal = 0
+speak_flag = True
+
+
+def set_speak_flag(event):
+    global speak_flag
+    speak_flag = True
+
+
+def unset_speak_flag(event):
+    global speak_flag
+    speak_flag = False
 
 
 def _trigger_expect_response(message):
@@ -35,12 +46,14 @@ def handle_speak(event):
     ConfigurationManager.init(ws)
     global _last_stop_signal
 
+    utterance = event.data['utterance']
+    expect_response = event.data.get('expect_response', False)
+    mute = event.data.get("mute", False)
     # Mild abuse of the signal system to allow other processes to detect
     # when TTS is happening.  See mycroft.util.is_speaking()
     create_signal("isSpeaking")
 
-    utterance = event.data['utterance']
-    if event.data.get('expect_response', False):
+    if expect_response:
         ws.once('recognizer_loop:audio_output_end', _trigger_expect_response)
 
     # This is a bit of a hack for Picroft.  The analog audio on a Pi blocks
@@ -51,21 +64,25 @@ def handle_speak(event):
     #
     # TODO: Remove or make an option?  This is really a hack, anyway,
     # so we likely will want to get rid of this when not running on Mimic
-    if not config.get('enclosure', {}).get('platform') == "picroft":
-        start = time.time()
-        chunks = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?)\s',
-                          utterance)
-        for chunk in chunks:
-            try:
-                mute_and_speak(chunk)
-            except KeyboardInterrupt:
-                raise
-            except:
-                logger.error('Error in mute_and_speak', exc_info=True)
-            if _last_stop_signal > start or check_for_signal('buttonPress'):
-                break
-    else:
-        mute_and_speak(utterance)
+    if not mute:
+        # Mild abuse of the signal system to allow other processes to detect
+        # when TTS is happening.  See mycroft.util.is_speaking()
+        create_signal("isSpeaking")
+        if not config.get('enclosure', {}).get('platform') == "picroft":
+            start = time.time()
+            chunks = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?)\s',
+                              utterance)
+            for chunk in chunks:
+                try:
+                    mute_and_speak(chunk)
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    logger.error('Error in mute_and_speak', exc_info=True)
+                if _last_stop_signal > start or check_for_signal('buttonPress'):
+                    break
+        else:
+            mute_and_speak(utterance)
 
     # This check will clear the "signal"
     check_for_signal("isSpeaking")
@@ -79,6 +96,7 @@ def mute_and_speak(utterance):
             utterance: The sentence to be spoken
     """
     global tts_hash
+    global speak_flag
 
     lock.acquire()
     # update TTS object if configuration has changed
@@ -94,7 +112,8 @@ def mute_and_speak(utterance):
 
     logger.info("Speak: " + utterance)
     try:
-        tts.execute(utterance)
+        if speak_flag:
+            tts.execute(utterance)
     finally:
         lock.release()
 
@@ -125,6 +144,8 @@ def init(websocket):
     config = ConfigurationManager.get()
     ws.on('mycroft.stop', handle_stop)
     ws.on('speak', handle_speak)
+    ws.on('speak.enable', set_speak_flag)
+    ws.on('speak.disable', unset_speak_flag)
 
     tts = TTSFactory.create()
     tts.init(ws)

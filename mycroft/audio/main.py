@@ -44,7 +44,7 @@ logger = getLogger("Audio")
 ws = None
 
 default = None
-service = []
+services = []
 current = None
 config = None
 pulse = None
@@ -127,6 +127,7 @@ def load_services(config, ws, path=None):
         except:
             logger.error('Failed to import module ' + descriptor['name'],
                          exc_info=True)
+            continue
         if (hasattr(service_module, 'autodetect') and
                 callable(service_module.autodetect)):
             try:
@@ -153,14 +154,14 @@ def load_services_callback():
     """
     global ws
     global default
-    global service
+    global services
 
     config = ConfigurationManager.get().get("Audio")
-    service = load_services(config, ws)
-    logger.info(service)
+    services = load_services(config, ws)
+    logger.info(services)
     default_name = config.get('default-backend', '')
     logger.info('Finding default backend...')
-    for s in service:
+    for s in services:
         logger.info('checking ' + s.name)
         if s.name == default_name:
             default = s
@@ -365,7 +366,7 @@ def play(tracks, prefered_service):
         logger.info(default.name)
         service = default
     else:  # Check if any other service can play the media
-        for s in service:
+        for s in services:
             logger.info(str(s))
             if uri_type in s.supported_uris():
                 service = s
@@ -389,14 +390,14 @@ def _play(message):
         Args:
             message: message bus message, not used but required
     """
-    global service
+    global services
     logger.info('mycroft.audio.service.play')
     logger.info(message.data['tracks'])
 
     tracks = message.data['tracks']
 
     # Find if the user wants to use a specific backend
-    for s in service:
+    for s in services:
         logger.info(s.name)
         if s.name in message.data['utterance']:
             prefered_service = s

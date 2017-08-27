@@ -25,6 +25,20 @@ sudo apt-get install -y \
     libicu-dev \
     pkg-config \
     automake \
+    xvfb \
+    firefox-esr \
+    vlc \
+    libopencv-dev \
+    python-opencv \
+    libxml2-dev \
+    libxslt1-dev \
+    build-essential \
+    gfortran \
+    libatlas-base-dev \
+    gnupg \
+    libcurl4-openssl-dev \
     libjpeg-dev \
-    libfann-dev
-
+    libfann-dev \
+    libgeos-dev \
+    libatlas-base-dev \
+    python-xlib

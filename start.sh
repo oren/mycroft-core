@@ -2,17 +2,21 @@
 TOP=$(cd $(dirname $0) && pwd -L)
 
 if [ -z "$WORKON_HOME" ]; then
-    VIRTUALENV_ROOT=${VIRTUALENV_ROOT:-"${HOME}/.virtualenvs/mycroft"}
+    VIRTUALENV_ROOT=${VIRTUALENV_ROOT:-"${HOME}/.virtualenvs/jarbas"}
 else
-    VIRTUALENV_ROOT="$WORKON_HOME/mycroft"
+    VIRTUALENV_ROOT="$WORKON_HOME/jarbas"
 fi
 
 ${TOP}/scripts/prepare-msm.sh
 
 case $1 in
 	"service") SCRIPT=${TOP}/mycroft/messagebus/service/main.py ;;
+	"webchat") SCRIPT=${TOP}/mycroft/client/webchat/main.py ;;
+	"server") SCRIPT=${TOP}/mycroft/client/server/main.py ;;
+	"client") SCRIPT=${TOP}/mycroft/client/client/main.py ;;
 	"skills") SCRIPT=${TOP}/mycroft/skills/main.py ;;
 	"audio") SCRIPT=${TOP}/mycroft/audio/main.py ;;
+	"display") SCRIPT=${TOP}/mycroft/screen_display/main.py ;;
 	"skill_container") SCRIPT=${TOP}/mycroft/skills/container.py ;;
 	"voice") SCRIPT=${TOP}/mycroft/client/speech/main.py ;;
 	"cli") SCRIPT=${TOP}/mycroft/client/text/main.py ;;

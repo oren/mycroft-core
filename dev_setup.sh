@@ -34,14 +34,14 @@ fi
 
 # Configure to use the standard commit template for
 # this repo only.
-git config commit.template .gitmessage
+# git config commit.template .gitmessage
 
 TOP=$(cd $(dirname $0) && pwd -L)
 
 if [ -z "$WORKON_HOME" ]; then
-    VIRTUALENV_ROOT=${VIRTUALENV_ROOT:-"${HOME}/.virtualenvs/mycroft"}
+    VIRTUALENV_ROOT=${VIRTUALENV_ROOT:-"${HOME}/.virtualenvs/jarbas"}
 else
-    VIRTUALENV_ROOT="$WORKON_HOME/mycroft"
+    VIRTUALENV_ROOT="$WORKON_HOME/jarbas"
 fi
 
 # Check whether to build mimic (it takes a really long time!)
@@ -69,34 +69,27 @@ else
 fi
 
 # create virtualenv, consistent with virtualenv-wrapper conventions
-if [ ! -d "${VIRTUALENV_ROOT}" ]; then
-   mkdir -p $(dirname "${VIRTUALENV_ROOT}")
-  virtualenv -p python2.7 "${VIRTUALENV_ROOT}"
+if [ ! -d ${VIRTUALENV_ROOT} ]; then
+   mkdir -p $(dirname ${VIRTUALENV_ROOT})
+  virtualenv -p python2.7 ${VIRTUALENV_ROOT}
 fi
-source "${VIRTUALENV_ROOT}/bin/activate"
-cd "${TOP}"
-easy_install pip==7.1.2 # force version of pip
+
+source ${VIRTUALENV_ROOT}/bin/activate
+cd ${TOP}
+easy_install pip
 pip install --upgrade virtualenv
 
-# Add mycroft-core to the virtualenv path
-# (This is equivalent to typing 'add2virtualenv $TOP', except
-# you can't invoke that shell function from inside a script)
-VENV_PATH_FILE="${VIRTUALENV_ROOT}/lib/python2.7/site-packages/_virtualenv_path_extensions.pth"
-if [ ! -f "$VENV_PATH_FILE" ] ; then
-    echo "import sys; sys.__plen = len(sys.path)" > "$VENV_PATH_FILE" || return 1
-    echo "import sys; new=sys.path[sys.__plen:]; del sys.path[sys.__plen:]; p=getattr(sys,'__egginsert',0); sys.path[p:p]=new; sys.__egginsert = p+len(new)" >> "$VENV_PATH_FILE" || return 1
-fi
+# copy global open-cv to virtual env
+# https://medium.com/@manuganji/installation-of-opencv-numpy-scipy-inside-a-virtualenv-bf4d82220313
+sudo cp /usr/lib/python2.7/dist-packages/cv* $VIRTUALENV_ROOT/lib/python2.7/site-packages/
 
-if ! grep -q "mycroft-core" $VENV_PATH_FILE; then
-   echo "Adding mycroft-core to virtualenv path"
-   sed -i.tmp '1 a\
-'"$TOP"'
-' "${VENV_PATH_FILE}"
-fi
+# tensorflow from binary
+pip install --upgrade https://storage.googleapis.com/tensorflow/linux/cpu/tensorflow-1.2.1-cp27-none-linux_x86_64.whl
 
-# install requirements (except pocketsphinx)
-# removing the pip2 explicit usage here for consistency with the above use.
+# fixed tzwhere
+pip install git+https://github.com/seahawk1986/pytzwhere.git@fix_install
 
+# install other requirements
 if ! pip install -r requirements.txt; then
     echo "Warning: Failed to install all requirements. Continue? y/N"
     read -n1 continue
@@ -105,6 +98,10 @@ if ! pip install -r requirements.txt; then
     fi
 fi
 
+# nltk
+python -m nltk.downloader wordnet
+python -m nltk.downloader punkt
+
 SYSMEM=$(free|awk '/^Mem:/{print $2}')
 MAXCORES=$(($SYSMEM / 512000))
 CORES=$(nproc)
@@ -112,11 +109,13 @@ CORES=$(nproc)
 if [[ ${MAXCORES} -lt ${CORES} ]]; then
   CORES=${MAXCORES}
 fi
+
 echo "Building with $CORES cores."
 
 #build and install pocketsphinx
 #cd ${TOP}
 #${TOP}/scripts/install-pocketsphinx.sh -q
+
 #build and install mimic
 cd "${TOP}"
 
@@ -128,4 +127,12 @@ else
 fi
 
 # install pygtk for desktop_launcher skill
-"${TOP}/scripts/install-pygtk.sh" " ${CORES}"
+# "${TOP}/scripts/install-pygtk.sh" " ${CORES}"
+
+
+# get geckodriver to usr/bin for browser service
+wget https://github.com/mozilla/geckodriver/releases/download/v0.18.0/geckodriver-v0.18.0-linux64.tar.gz
+tar -xvzf geckodriver-v0.18.0-linux64.tar.gz
+chmod +x geckodriver
+sudo mv geckodriver /usr/local/bin/
+sudo rm -rf geckodriver-v0.18.0-linux64.tar.gz

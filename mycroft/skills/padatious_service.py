@@ -18,11 +18,11 @@ from subprocess import call
 from time import time as get_time, sleep
 
 from threading import Event
-from os.path import expanduser, isfile
+from os.path import expanduser, isfile, exists, dirname
+from os import mkdir
 
 from mycroft.configuration import ConfigurationManager
 from mycroft.messagebus.message import Message
-from mycroft.skills.core import FallbackSkill
 from mycroft.util.log import getLogger
 from mycroft.util.parse import normalize
 
@@ -31,12 +31,14 @@ __author__ = 'matthewscholefield'
 logger = getLogger(__name__)
 
 
-class PadatiousService(FallbackSkill):
+class PadatiousService(object):
     def __init__(self, emitter):
-        FallbackSkill.__init__(self)
         self.config = ConfigurationManager.get()['padatious']
-        intent_cache = expanduser(self.config['intent_cache'])
-
+        # intent_cache = expanduser(self.config['intent_cache'])
+        # TODO really fix this
+        intent_cache = dirname(__file__) + "/intent_cache"
+        if not exists(intent_cache):
+            mkdir(intent_cache)
         try:
             from padatious import IntentContainer
         except ImportError:
@@ -52,7 +54,7 @@ class PadatiousService(FallbackSkill):
 
         self.emitter = emitter
         self.emitter.on('padatious:register_intent', self.register_intent)
-        self.register_fallback(self.handle_fallback, 5)
+        self.emitter.on('padatious:fallback.request', self.handle_fallback)
         self.finished_training_event = Event()
 
         self.train_delay = self.config['train_delay']
@@ -69,7 +71,7 @@ class PadatiousService(FallbackSkill):
 
             self.finished_training_event.clear()
             logger.info('Training...')
-            self.container.train(print_updates=False)
+            self.container.train(print_updates=True)
             logger.info('Training complete.')
             self.finished_training_event.set()
 
@@ -99,7 +101,10 @@ class PadatiousService(FallbackSkill):
         data = self.container.calc_intent(utt)
 
         if data.conf < 0.5:
-            return False
+            success = False
+        else:
+            success = True
+            self.emitter.emit(Message(data.name, data=data.matches))
 
-        self.emitter.emit(Message(data.name, data=data.matches))
-        return True
+        self.emitter.emit(Message('padatious:fallback.response',
+                                  data={"success": success}))

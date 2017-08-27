@@ -1,0 +1,2 @@
+(filename|file name|name|file) (to|for|with|on|in|as|like) (?P<DictationFileName>.*)
+(open|get) (?P<DictationFileName>.*) (dictation|file)

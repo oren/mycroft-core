@@ -19,9 +19,11 @@ import imp
 import time
 
 import operator
+import os.path
 import re
-from os.path import join, dirname, splitext, isdir, basename, exists
-from os import listdir
+import time
+from os.path import join, dirname, splitext, isdir
+
 from functools import wraps
 
 from adapt.intent import Intent, IntentBuilder
@@ -33,11 +35,20 @@ from mycroft.filesystem import FileSystemAccess
 from mycroft.messagebus.message import Message
 from mycroft.util.log import getLogger
 from mycroft.skills.settings import SkillSettings
+from mycroft import MYCROFT_ROOT_PATH
 
 __author__ = 'seanfitz'
 
 skills_config = ConfigurationManager.instance().get("skills")
-BLACKLISTED_SKILLS = skills_config.get("blacklisted_skills", [])
+config_dir = skills_config.get("directory", "default")
+if config_dir == "default":
+    SKILLS_DIR = join(MYCROFT_ROOT_PATH, "jarbas_skills")
+else:
+    SKILLS_DIR = config_dir
+
+
+BLACKLISTED_SKILLS = skills_config.get("blacklisted_skills", {})
+
 
 MainModule = '__init__'
 
@@ -87,14 +98,14 @@ def load_regex_from_file(path, emitter):
 
 
 def load_vocabulary(basedir, emitter):
-    for vocab_type in listdir(basedir):
+    for vocab_type in os.listdir(basedir):
         if vocab_type.endswith(".voc"):
             load_vocab_from_file(
                 join(basedir, vocab_type), splitext(vocab_type)[0], emitter)
 
 
 def load_regex(basedir, emitter):
-    for regex_type in listdir(basedir):
+    for regex_type in os.listdir(basedir):
         if regex_type.endswith(".rx"):
             load_regex_from_file(
                 join(basedir, regex_type), emitter)
@@ -131,14 +142,17 @@ def load_skill(skill_descriptor, emitter, skill_id):
                 callable(skill_module.create_skill)):
             # v2 skills framework
             skill = skill_module.create_skill()
+            if not skill.is_current_language_supported():
+                logger.info("SKILL DOES NOT SUPPORT CURRENT LANGUAGE")
+                return None
             skill.bind(emitter)
-            skill.skill_id = skill_id
             skill._dir = dirname(skill_descriptor['info'][1])
+            skill.skill_id = skill_id
             skill.load_data_files(dirname(skill_descriptor['info'][1]))
             # Set up intent handlers
             skill.initialize()
+            logger.info("Loaded " + skill_descriptor["name"] + " with ID " + str(skill_id))
             skill._register_decorated()
-            logger.info("Loaded " + skill_descriptor["name"])
             return skill
         else:
             logger.warn(
@@ -150,12 +164,48 @@ def load_skill(skill_descriptor, emitter, skill_id):
     return None
 
 
+def get_skills(skills_folder):
+    logger.info("LOADING SKILLS FROM " + skills_folder)
+    skills = []
+    possible_skills = os.listdir(skills_folder)
+    for i in possible_skills:
+        location = join(skills_folder, i)
+        if (isdir(location) and
+                not MainModule + ".py" in os.listdir(location)):
+            for j in os.listdir(location):
+                name = join(location, j)
+                if (not isdir(name) or
+                        not MainModule + ".py" in os.listdir(name)):
+                    continue
+                skills.append(create_skill_descriptor(name))
+        if (not isdir(location) or
+                not MainModule + ".py" in os.listdir(location)):
+            continue
+
+        skills.append(create_skill_descriptor(location))
+    skills = sorted(skills, key=lambda p: p.get('name'))
+    return skills
+
+
 def create_skill_descriptor(skill_folder):
     info = imp.find_module(MainModule, [skill_folder])
-    return {"name": basename(skill_folder), "info": info}
+    return {"name": os.path.basename(skill_folder), "info": info}
 
 
-# Lists used when adding skill handlers using decorators
+def load_skills(emitter, skills_root=SKILLS_DIR):
+    logger.info("Checking " + skills_root + " for new skills")
+    skill_list = []
+    for skill in get_skills(skills_root):
+        skill_list.append(load_skill(skill, emitter))
+
+    return skill_list
+
+
+def unload_skills(skills):
+    for s in skills:
+        s.shutdown()
+
+
 _intent_list = []
 _intent_file_list = []
 
@@ -202,8 +252,17 @@ class MycroftSkill(object):
         self.registered_intents = []
         self.log = getLogger(self.name)
         self.reload_skill = True
+        self.external_reload = True
+        self.external_shutdown = True
         self.events = []
         self.skill_id = 0
+        self.message_context = self.get_message_context()
+
+    def is_current_language_supported(self):
+        # for backward compatibility, by default,
+        # en-US is the only language supported.
+        # return unconditionally True if all languages are supported.
+        return self.lang == "en-us"
 
     @property
     def location(self):
@@ -238,7 +297,10 @@ class MycroftSkill(object):
         try:
             return self._settings
         except:
-            self._settings = SkillSettings(self._dir)
+            try:
+                self._settings = SkillSettings(self._dir)
+            except:
+                self._settings = SkillSettings(dirname(__file__))
             return self._settings
 
     def bind(self, emitter):
@@ -247,6 +309,8 @@ class MycroftSkill(object):
             self.emitter = emitter
             self.enclosure = EnclosureAPI(emitter, self.name)
             self.__register_stop()
+            self.emitter.on('enable_intent', self.handle_enable_intent)
+            self.emitter.on('disable_intent', self.handle_disable_intent)
 
     def __register_stop(self):
         self.stop_time = time.time()
@@ -304,25 +368,27 @@ class MycroftSkill(object):
         _intent_list = []
         _intent_file_list = []
 
-    def add_event(self, name, handler, need_self):
+    def add_event(self, name, handler, need_self=False):
         """
-            Create event handler for executing intent
+                  Create event handler for executing intent
 
-            Args:
-                name:       IntentParser name
-                handler:    method to call
-                need_self:     optional parameter, when called from a decorated
-                               intent handler the function will need the self
-                               variable passed as well.
-        """
+                  Args:
+                      name:       IntentParser name
+                      handler:    method to call
+                      need_self:     optional parameter, when called from a decorated
+                                     intent handler the function will need the self
+                                     variable passed as well.
+              """
         def wrapper(message):
             try:
+                self.emitter.emit(Message("intent.execution.start",
+                                          {"status": "start", "intent": name}))
                 if need_self:
                     # When registring from decorator self is required
                     handler(self, message)
                 else:
                     handler(message)
-            except:
+            except Exception as e:
                 # TODO: Localize
                 self.speak(
                     "An error occurred while processing a request in " +
@@ -330,22 +396,29 @@ class MycroftSkill(object):
                 logger.error(
                     "An error occurred while processing a request in " +
                     self.name, exc_info=True)
+                self.emitter.emit(Message("intent.execution.error",
+                                          {"status": "failed", "intent": name, "exception": str(e)}))
+                return
+            self.emitter.emit(Message("intent.execution.end",
+                                      {"status": "executed", "intent": name}))
+
         if handler:
+            self.emitter.on(name, self.handle_update_message_context)
             self.emitter.on(name, wrapper)
             self.events.append((name, wrapper))
 
     def register_intent(self, intent_parser, handler, need_self=False):
         """
-            Register an Intent with the intent service.
+                    Register an Intent with the intent service.
 
-            Args:
-                intent_parser: Intent or IntentBuilder object to parse
-                               utterance for the handler.
-                handler:       function to register with intent
-                need_self:     optional parameter, when called from a decorated
-                               intent handler the function will need the self
-                               variable passed as well.
-        """
+                    Args:
+                        intent_parser: Intent or IntentBuilder object to parse
+                                       utterance for the handler.
+                        handler:       function to register with intent
+                        need_self:     optional parameter, when called from a decorated
+                                       intent handler the function will need the self
+                                       variable passed as well.
+                """
         if type(intent_parser) == IntentBuilder:
             intent_parser = intent_parser.build()
         elif type(intent_parser) != Intent:
@@ -355,30 +428,37 @@ class MycroftSkill(object):
         intent_parser.name = str(self.skill_id) + ':' + intent_parser.name
         self.emitter.emit(Message("register_intent", intent_parser.__dict__))
         self.registered_intents.append((name, intent_parser))
-        self.add_event(intent_parser.name, handler, need_self)
+        self.add_event(intent_parser.name, handler)
 
-    def register_intent_file(self, intent_file, handler, need_self=False):
+    def register_intent_file(self, intent_file, handler):
         """
-            Register an Intent file with the intent service.
+                  Register an Intent file with the intent service.
 
-            Args:
-                intent_file: name of file that contains example queries
-                             that should activate the intent
-                handler:     function to register with intent
-                need_self:   use for decorator. See register_intent
-        """
+                  Args:
+                      intent_file: name of file that contains example queries
+                                   that should activate the intent
+                      handler:     function to register with intent
+                      need_self:   use for decorator. See register_intent
+              """
+
         intent_name = str(self.skill_id) + ':' + intent_file
         self.emitter.emit(Message("padatious:register_intent", {
             "file_name": join(self.vocab_dir, intent_file),
             "intent_name": intent_name
         }))
-        self.add_event(intent_name, handler, need_self)
+        self.add_event(intent_name, handler)
+
+    def handle_update_message_context(self, message):
+        self.message_context = self.get_message_context(message.context)
 
     def disable_intent(self, intent_name):
         """Disable a registered intent"""
-        logger.debug('Disabling intent ' + intent_name)
-        name = str(self.skill_id) + ':' + intent_name
-        self.emitter.emit(Message("detach_intent", {"intent_name": name}))
+        for (name, intent) in self.registered_intents:
+            if name == intent_name:
+                logger.debug('Disabling intent ' + intent_name)
+                name = str(self.skill_id) + ':' + intent_name
+                self.emitter.emit(Message("detach_intent", {"intent_name": name}))
+                return
 
     def enable_intent(self, intent_name):
         """Reenable a registered intent"""
@@ -387,11 +467,16 @@ class MycroftSkill(object):
                 self.registered_intents.remove((name, intent))
                 intent.name = name
                 self.register_intent(intent, None)
-                logger.debug('Enabling intent ' + intent_name)
-                break
-            else:
-                logger.error('Could not enable ' + intent_name +
-                             ', it hasn\'t been registered.')
+                logger.info("Enabling Intent " + intent_name)
+                return
+
+    def handle_enable_intent(self, message):
+        intent_name = message.data["intent_name"]
+        self.enable_intent(intent_name)
+
+    def handle_disable_intent(self, message):
+        intent_name = message.data["intent_name"]
+        self.disable_intent(intent_name)
 
     def set_context(self, context, word=''):
         """
@@ -405,8 +490,8 @@ class MycroftSkill(object):
             raise ValueError('context should be a string')
         if not isinstance(word, basestring):
             raise ValueError('word should be a string')
-        self.emitter.emit(Message('add_context',
-                                  {'context': context, 'word': word}))
+        self.emitter.emit(Message('add_context', {'context': context, 'word':
+                          word}))
 
     def remove_context(self, context):
         """
@@ -431,40 +516,67 @@ class MycroftSkill(object):
         re.compile(regex_str)  # validate regex
         self.emitter.emit(Message('register_vocab', {'regex': regex_str}))
 
-    def speak(self, utterance, expect_response=False):
-        """
-            Speak a sentence.
+    def get_message_context(self, message_context=None):
+        if message_context is None:
+            message_context = {"destinatary": "all", "source": self.name, "mute": False, "more_speech": False, "target": "all"}
+        else:
+            if "destinatary" not in message_context.keys():
+                message_context["destinatary"] = self.message_context.get("destinatary", "all")
+            if "target" not in message_context.keys():
+                message_context["target"] = self.message_context.get("target", "all")
+            if "mute" not in message_context.keys():
+                message_context["mute"] = self.message_context.get("mute", False)
+            if "more_speech" not in message_context.keys():
+                message_context["more_speech"] = self.message_context.get("more_speech", False)
+        if message_context.get("source", "skills") == "skills":
+            message_context["source"] = self.name
+        return message_context
 
-            Args:
-                utterance:          sentence mycroft should speak
-                expect_response:    set to True if Mycroft should expect a
-                                    response from the user and start listening
-                                    for response.
+    def speak(self, utterance, expect_response=False, metadata=None, message_context=None):
         """
+                    Speak a sentence.
+
+                    Args:
+                        utterance:          sentence mycroft should speak
+                        expect_response:    set to True if Mycroft should expect a
+                                            response from the user and start listening
+                                            for response.
+                """
+        if message_context is None:
+            # use current context
+            message_context = {}
+        if metadata is None:
+            metadata = {}
         # registers the skill as being active
         self.enclosure.register(self.name)
         data = {'utterance': utterance,
-                'expect_response': expect_response}
-        self.emitter.emit(Message("speak", data))
+                'expect_response': expect_response,
+                "metadata": metadata}
+        self.emitter.emit(Message("speak", data, self.get_message_context(message_context)))
+        self.set_context('Last_Speech', utterance)
+        for field in metadata:
+            self.set_context(field, metadata[field])
 
-    def speak_dialog(self, key, data={}, expect_response=False):
+    def speak_dialog(self, key, data=None, expect_response=False, metadata=None, message_context=None):
         """
-            Speak sentance based of dialog file.
+                   Speak sentance based of dialog file.
 
-            Args
-                key: dialog file key (filname without extension)
-                data: information to populate sentence with
-                expect_response:    set to True if Mycroft should expect a
-                                    response from the user and start listening
-                                    for response.
-        """
-
-        data['expect_response'] = expect_response
-        self.speak(self.dialog_renderer.render(key, data))
+                   Args
+                       key: dialog file key (filname without extension)
+                       data: information to populate sentence with
+                       expect_response:    set to True if Mycroft should expect a
+                                           response from the user and start listening
+                                           for response.
+               """
+        if data is None:
+            data = {}
+        self.speak(self.dialog_renderer.render(key, data),
+                   expect_response=expect_response, metadata=metadata,
+                   message_context=message_context)
 
     def init_dialog(self, root_directory):
         dialog_dir = join(root_directory, 'dialog', self.lang)
-        if exists(dialog_dir):
+        if os.path.exists(dialog_dir):
             self.dialog_renderer = DialogLoader().load(dialog_dir)
         else:
             logger.debug('No dialog loaded, ' + dialog_dir + ' does not exist')
@@ -473,12 +585,12 @@ class MycroftSkill(object):
         self.init_dialog(root_directory)
         self.load_vocab_files(join(root_directory, 'vocab', self.lang))
         regex_path = join(root_directory, 'regex', self.lang)
-        if exists(regex_path):
+        if os.path.exists(regex_path):
             self.load_regex_files(regex_path)
 
     def load_vocab_files(self, vocab_dir):
         self.vocab_dir = vocab_dir
-        if exists(vocab_dir):
+        if os.path.exists(vocab_dir):
             load_vocabulary(vocab_dir, self.emitter)
         else:
             logger.debug('No vocab loaded, ' + vocab_dir + ' does not exist')
@@ -501,6 +613,14 @@ class MycroftSkill(object):
     @abc.abstractmethod
     def stop(self):
         pass
+
+    def config_update(self, config=None, save=False, isSystem=False):
+        if config is None:
+            config = {}
+        if save:
+            ConfigurationManager.save(config, isSystem)
+        self.emitter.emit(
+            Message("configuration.patch", {"config": config}))
 
     def is_stop(self):
         passed_time = time.time() - self.stop_time
@@ -536,6 +656,9 @@ class FallbackSkill(MycroftSkill):
         by their priority.
     """
     fallback_handlers = {}
+    folders = {}
+    override = skills_config.get("fallback_override", False)
+    order = skills_config.get("fallback_priority", [])
 
     def __init__(self, name=None, emitter=None):
         MycroftSkill.__init__(self, name, emitter)
@@ -545,23 +668,64 @@ class FallbackSkill(MycroftSkill):
 
     @classmethod
     def make_intent_failure_handler(cls, ws):
-        """Goes through all fallback handlers until one returns True"""
-
+        """Goes through all fallback handlers until one returns true"""
         def handler(message):
-            for _, handler in sorted(cls.fallback_handlers.items(),
-                                     key=operator.itemgetter(0)):
+            if cls.override:
                 try:
-                    if handler(message):
-                        return
+                    # try fallbacks by pre defined order
+                    logger.info("Overriding fallback order")
+                    logger.info("Fallback order " + str(cls.order))
+                    missing_folders = cls.folders.keys()
+                    logger.info("Fallbacks " + str(missing_folders))
+                    for folder in cls.order:
+                        for f in cls.folders.keys():
+                            if folder == f:
+                                if f in missing_folders:
+                                    missing_folders.remove(f)
+                                logger.info("Trying ordered fallback: " + folder)
+                                handler, context_update_handler =cls.folders[f]
+                                try:
+                                    context_update_handler(message)
+                                    if handler(message):
+                                        return
+                                except Exception as e:
+                                    logger.info('Exception in fallback: ' + cls.name + " " +
+                                                str(e))
+                    logger.info("Missing fallbacks " + str(missing_folders))
+                    for folder in missing_folders:
+                        logger.info("fallback not in ordered list, trying it now: " +
+                                    folder)
+                        handler, context_update_handler = cls.folders[folder]
+                        try:
+                            context_update_handler(message)
+                            if handler(message):
+                                return
+                        except Exception as e:
+                            logger.info('Exception in fallback: ' + cls.name + " " +
+                                        str(e))
                 except Exception as e:
-                    logger.info('Exception in fallback: ' + str(e))
+                    logger.error(e)
+                    logger.warning("Fallback override is not working")
+            else:
+                # try fallbacks by priority
+                for _, handler, context_update_handler in sorted(
+                        cls.fallback_handlers.items(),
+                                         key=operator.itemgetter(0)):
+                    try:
+                        context_update_handler(message)
+                        if handler(message):
+                            return
+                    except Exception as e:
+                        logger.info('Exception in fallback: ' + cls.name + " " +
+                                    str(e))
             ws.emit(Message('complete_intent_failure'))
             logger.warn('No fallback could handle intent.')
 
         return handler
 
     @classmethod
-    def _register_fallback(cls, handler, priority):
+    def _register_fallback(cls, handler, priority, skill_folder=None,
+                           context_update_handler=None):
         """
         Register a function to be called as a general info fallback
         Fallback should receive message and return
@@ -573,7 +737,14 @@ class FallbackSkill(MycroftSkill):
         while priority in cls.fallback_handlers:
             priority += 1
 
-        cls.fallback_handlers[priority] = handler
+        cls.fallback_handlers[priority] = handler, context_update_handler
+
+       # folder name
+        if skill_folder:
+            skill_folder = skill_folder.split("/")[-1]
+            cls.folders[skill_folder] = handler, context_update_handler
+        else:
+            logger.warning("skill folder error registering fallback")
 
     def register_fallback(self, handler, priority):
         """
@@ -581,7 +752,14 @@ class FallbackSkill(MycroftSkill):
             and with the list of handlers registered by this instance
         """
         self.instance_fallback_handlers.append(handler)
-        self._register_fallback(handler, priority)
+        # folder path
+        try:
+            skill_folder = self._dir
+        except:
+            skill_folder = dirname(__file__)  # skill
+        context_update_handler = self.handle_update_message_context
+        self._register_fallback(handler, priority, skill_folder,
+                                context_update_handler)
 
     @classmethod
     def remove_fallback(cls, handler_to_del):
@@ -591,11 +769,23 @@ class FallbackSkill(MycroftSkill):
             Args:
                 handler_to_del: reference to handler
         """
+        flag1 = False
         for priority, handler in cls.fallback_handlers.items():
             if handler == handler_to_del:
                 del cls.fallback_handlers[priority]
-                return
-        logger.warn('Could not remove fallback!')
+                flag1 = True
+
+        flag2 = False
+        for folder in cls.folders.keys():
+            handler = cls.folders[folder]
+            if handler == handler_to_del:
+                del cls.folders[folder]
+                flag2 = True
+
+        if not flag1:
+            logger.warn('Could not remove fallback!')
+        if not flag2:
+            logger.warn('Could not remove ordered fallback!')
 
     def remove_instance_handlers(self):
         """

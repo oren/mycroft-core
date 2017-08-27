@@ -20,6 +20,7 @@ import inflection
 import re
 from genericpath import exists, isfile
 from os.path import join, dirname, expanduser
+from os import mkdir
 
 from mycroft.util.log import getLogger
 from mycroft.util.json_helper import load_commented_json
@@ -28,12 +29,14 @@ __author__ = 'seanfitz, jdorleans'
 
 LOG = getLogger(__name__)
 
-DEFAULT_CONFIG = join(dirname(__file__), 'mycroft.conf')
-SYSTEM_CONFIG = '/etc/mycroft/mycroft.conf'
-USER_CONFIG = join(expanduser('~'), '.mycroft/mycroft.conf')
+DEFAULT_CONFIG = join(dirname(__file__), 'jarbas.conf')
+SYSTEM_CONFIG = '/etc/jarbas/jarbas.conf'
+USER_CONFIG = join(expanduser('~'), '.jarbas/jarbas.conf')
 REMOTE_CONFIG = "mycroft.ai"
+RUNTIME_CONFIG = join(dirname(__file__), 'jarbas_runtime.conf')
 
-load_order = [DEFAULT_CONFIG, REMOTE_CONFIG, SYSTEM_CONFIG, USER_CONFIG]
+load_order = [DEFAULT_CONFIG, REMOTE_CONFIG, SYSTEM_CONFIG, USER_CONFIG,
+              RUNTIME_CONFIG]
 
 
 class ConfigurationLoader(object):
@@ -134,7 +137,7 @@ class RemoteConfiguration(object):
     config in the [core] config section
     """
     IGNORED_SETTINGS = ["uuid", "@type", "active", "user", "device"]
-    WEB_CONFIG_CACHE = '/opt/mycroft/web_config_cache.json'
+    WEB_CONFIG_CACHE = '/opt/jarbas/web_config_cache.json'
 
     @staticmethod
     def validate(config):
@@ -300,10 +303,17 @@ class ConfigurationManager(object):
         Save configuration ``config``.
         """
         ConfigurationManager.update(config)
-        location = SYSTEM_CONFIG if is_system else USER_CONFIG
+        location = SYSTEM_CONFIG if is_system else RUNTIME_CONFIG
         try:
-            LOG.info("Saving config")
-            loc_config = load_commented_json(location)
+            LOG.info("Saving config: " + location)
+            dir = location.replace("/jarbas_runtime.conf", "").replace("/jarbas.conf", "")
+            if not exists(dir):
+                mkdir(dir)
+            try:
+                loc_config = load_commented_json(location)
+            except:
+                loc_config = {}
+
             with open(location, 'w') as f:
                 config = loc_config.update(config)
                 json.dump(config, f)
@@ -319,6 +329,7 @@ class _ConfigurationListener(object):
     is encountered.
      'configuration.update', and updates the cached configuration when this
     is encountered.
+
 
     """
 

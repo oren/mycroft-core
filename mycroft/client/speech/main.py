@@ -16,7 +16,7 @@
 # along with Mycroft Core.  If not, see <http://www.gnu.org/licenses/>.
 
 
-import re
+import time
 import sys
 from threading import Thread, Lock
 
@@ -56,9 +56,16 @@ def handle_wakeword(event):
     logger.info("Wakeword Detected: " + event['utterance'])
     ws.emit(Message('recognizer_loop:wakeword', event))
 
+def handle_hotword(event):
+    logger.info("Hotword Detected: " + event['hotword'])
+    ws.emit(Message('recognizer_loop:hotword', event))
+
+def handle_speak(event):
+    ws.emit(Message('speak', event))
 
 def handle_utterance(event):
     logger.info("Utterance: " + str(event['utterances']))
+    event["source"] = "speech"
     ws.emit(Message('recognizer_loop:utterance', event))
 
 
@@ -86,6 +93,12 @@ def handle_mic_mute(event):
 def handle_mic_unmute(event):
     if loop.is_muted():
         loop.unmute()
+
+
+def handle_stop(event):
+    global _last_stop_signal
+    _last_stop_signal = time.time()
+
 
 
 def handle_paired(event):
@@ -123,10 +136,14 @@ def main():
     loop.on('recognizer_loop:utterance', handle_utterance)
     loop.on('recognizer_loop:record_begin', handle_record_begin)
     loop.on('recognizer_loop:wakeword', handle_wakeword)
+    loop.on('recognizer_loop:hotword', handle_hotword)
+    loop.on('recognizer_loop:speak', handle_speak)
     loop.on('recognizer_loop:record_end', handle_record_end)
     loop.on('recognizer_loop:no_internet', handle_no_internet)
     ws.on('open', handle_open)
-    ws.on('complete_intent_failure', handle_complete_intent_failure)
+    ws.on(
+        'complete_intent_failure',
+        handle_complete_intent_failure)
     ws.on('recognizer_loop:sleep', handle_sleep)
     ws.on('recognizer_loop:wake_up', handle_wake_up)
     ws.on('mycroft.mic.mute', handle_mic_mute)
