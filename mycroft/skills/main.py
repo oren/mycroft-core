@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from os.path import exists, join
-from threading import Timer
+from threading import Timer, Thread
 
 from mycroft import MYCROFT_ROOT_PATH
 from mycroft.configuration import ConfigurationManager
@@ -30,7 +30,7 @@ from mycroft.lock import Lock  # Creates PID file for single instance
 from mycroft.messagebus.client.ws import WebsocketClient
 from mycroft.messagebus.message import Message
 from mycroft.skills.core import load_skill, create_skill_descriptor, \
-    MainModule, SKILLS_DIR, FallbackSkill
+    MainModule, FallbackSkill
 from mycroft.skills.intent_service import IntentService
 from mycroft.skills.padatious_service import PadatiousService
 from mycroft.util import connected
@@ -49,6 +49,7 @@ skills_directories = []
 skill_reload_thread = None
 skills_manager_timer = None
 id_counter = 0
+SKILLS_DIR = '/opt/mycroft/skills'
 
 installer_config = ConfigurationManager.instance().get("SkillInstallerSkill")
 MSM_BIN = installer_config.get("path", join(MYCROFT_ROOT_PATH, 'msm', 'msm'))
@@ -90,15 +91,15 @@ def install_default_skills(speak=True):
 
 
 def skills_manager(message):
+    """
+        skills_manager runs on a Timer every hour and checks for updated
+        skills.
+    """
     global skills_manager_timer, ws
 
     if connected():
         if skills_manager_timer is None:
             pass
-            # ws.emit(
-            #     Message("speak", {'utterance':
-            #             mycroft.dialog.get("checking for updates")}))
-
         # Install default skills and look for updates via Github
         logger.debug("==== Invoking Mycroft Skill Manager: " + MSM_BIN)
         install_default_skills(False)
@@ -110,10 +111,23 @@ def skills_manager(message):
 
 
 def _skills_manager_dispatch():
+    """
+        Thread function to trigger skill_manager over message bus.
+    """
     ws.emit(Message("skill_manager", {}))
 
 
-def _load_skills():
+def _starting_up():
+    """
+        Start loading skills.
+
+        Starts
+        - reloading of skills when needed
+        - a timer to check for internet connection
+        - a timer for updating skills every hour
+        - adapt intent service
+        - padatious intent service
+    """
     global ws, loaded_skills, last_modified_skill, skills_directories, \
         skill_reload_thread
 
@@ -133,12 +147,16 @@ def _load_skills():
     IntentService(ws)
 
     # Create a thread that monitors the loaded skills, looking for updates
-    skill_reload_thread = Timer(0, _watch_skills)
+    skill_reload_thread = Thread(target=_watch_skills)
     skill_reload_thread.daemon = True
     skill_reload_thread.start()
 
 
 def check_connection():
+    """
+        Check for network connection. If not paired trigger pairing.
+        Runs as a Timer every second until connection is detected.
+    """
     if connected():
         ws.emit(Message('mycroft.internet.connected'))
         # check for pairing, if not automatically start pairing
@@ -156,18 +174,37 @@ def check_connection():
 
 
 def _get_last_modified_date(path):
-    last_date = 0
-    # getting all recursive paths
-    for root, _, _ in os.walk(path):
-        f = root.replace(path, "")
-        # checking if is a hidden path
-        if not f.startswith(".") and not f.startswith("/."):
-            last_date = max(last_date, os.path.getmtime(path + f))
+    """
+        Get last modified date excluding compiled python files, hidden
+        directories and the settings.json file.
 
+        Arg:
+            path:   skill directory to check
+        Returns:    time of last change
+    """
+    last_date = 0
+    root_dir, subdirs, files = os.walk(path).next()
+    # get subdirs and remove hidden ones
+    subdirs = [s for s in subdirs if not s.startswith('.')]
+    for subdir in subdirs:
+        for root, _, _ in os.walk(join(path, subdir)):
+            base = os.path.basename(root)
+            # checking if is a hidden path
+            if not base.startswith(".") and not base.startswith("/."):
+                last_date = max(last_date, os.path.getmtime(root))
+
+    # check files of interest in the skill root directory
+    files = [f for f in files
+             if not f.endswith('.pyc') and f != 'settings.json']
+    for f in files:
+        last_date = max(last_date, os.path.getmtime(os.path.join(path, f)))
     return last_date
 
 
 def _watch_skills():
+    """
+        Thread function to reload skills when a change is detected.
+    """
     global ws, loaded_skills, last_modified_skill, \
         id_counter
 
@@ -196,8 +233,7 @@ def _watch_skills():
                         "loaded") and modified <= last_modified_skill:
                     continue
                 # checking if skill was modified
-                elif skill.get(
-                        "instance") and modified > last_modified_skill:
+                elif skill.get("instance") and modified > last_modified_skill:
                     # checking if skill should be reloaded
                     if not skill["instance"].reload_skill:
                         continue
@@ -218,12 +254,11 @@ def _watch_skills():
         time.sleep(2)
 
 
-def _starting_up():
-    # Startup:  Kick off loading of skills
-    _load_skills()
-
-
 def handle_converse_request(message):
+    """
+        handle_converse_request checks if the targeted skill id can handle
+        conversation.
+    """
     skill_id = int(message.data["skill_id"])
     utterances = message.data["utterances"]
     lang = message.data["lang"]
@@ -246,8 +281,8 @@ def handle_converse_request(message):
             except:
                 logger.error(
                     "Converse method malformed for skill " + str(skill_id))
-    ws.emit(Message("skill.converse.response", {
-        "skill_id": 0, "result": False}))
+    ws.emit(Message("skill.converse.response",
+                    {"skill_id": 0, "result": False}))
 
 
 def main():
